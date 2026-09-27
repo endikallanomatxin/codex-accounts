@@ -269,6 +269,43 @@ def sync_active_to_canonical(home: Path, accounts: list[Account]) -> Account | N
     return active
 
 
+def stop_codex_daemon(home: Path, codex_bin: str) -> str | None:
+    """
+    Stop Codex's shared app-server before replacing auth.json.
+
+    Current Codex versions cache authentication in the long-lived daemon, so
+    changing auth.json alone does not switch the account used by new TUI clients.
+    """
+    executable = shutil.which(codex_bin)
+    if executable is None:
+        raise RuntimeError(f"{codex_bin!r} not found in PATH; cannot safely switch accounts")
+
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(home)
+    try:
+        result = subprocess.run(
+            [executable, "app-server", "daemon", "stop"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("timed out stopping the Codex background server") from exc
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        suffix = f": {detail.splitlines()[-1]}" if detail else ""
+        raise RuntimeError(f"failed to stop the Codex background server{suffix}")
+
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    status = payload.get("status") if isinstance(payload, dict) else None
+    return status if isinstance(status, str) else None
+
+
 # ---------- app-server usage query ----------
 
 def write_jsonl(proc: subprocess.Popen[str], obj: dict[str, Any]) -> None:
@@ -376,7 +413,7 @@ def query_account(account: Account, source_auth: Path, codex_bin: str, timeout: 
                         "id": 1,
                         "method": "initialize",
                         "params": {
-                            "clientInfo": {"name": "codex-accounts", "title": "Codex Accounts", "version": "2.0.0"},
+                            "clientInfo": {"name": "codex-accounts", "title": "Codex Accounts", "version": "2.1.0"},
                             "capabilities": {"experimentalApi": False},
                         },
                     })
@@ -407,6 +444,46 @@ def query_account(account: Account, source_auth: Path, codex_bin: str, timeout: 
                     persist_temp_auth_if_replaced(temp_auth, source_auth)
     except Exception as exc:
         return QueryResult(account=account, error=str(exc))
+
+
+def run_account_greeting(account: Account, codex_bin: str, timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
+    """
+    Run the kick greeting in an isolated CODEX_HOME.
+
+    This avoids temporarily replacing the shared auth.json while a Codex daemon
+    may still be running. Any refreshed credentials are copied back afterward.
+    """
+    with tempfile.TemporaryDirectory(prefix=f"codex-accounts-kick-{account.name}-") as td:
+        temp_home = Path(td)
+        temp_auth = temp_home / "auth.json"
+        atomic_copy(account.path, temp_auth)
+        (temp_home / "config.toml").write_text(
+            'cli_auth_credentials_store = "file"\n',
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(temp_home)
+        try:
+            return subprocess.run(
+                [
+                    codex_bin,
+                    "exec",
+                    "--ephemeral",
+                    "--sandbox",
+                    "read-only",
+                    "--skip-git-repo-check",
+                    "-C",
+                    str(temp_home),
+                    "Hi! Reply with only 'Hi'.",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        finally:
+            if temp_auth.is_file():
+                atomic_copy(temp_auth, account.path)
 
 
 # ---------- formatting ----------
@@ -677,8 +754,13 @@ def command_switch(args: argparse.Namespace) -> int:
             print("available: " + ", ".join(a.name for a in accounts), file=sys.stderr)
         return 2
 
+    # Codex now keeps auth in a shared background app-server. Stop it before
+    # touching auth.json so it cannot keep serving or refresh the previous login.
+    daemon_status = stop_codex_daemon(home, args.codex_bin)
+
     live = home / "auth.json"
     active = find_active_account(home, accounts)
+    same_account_on_disk = active is not None and active.name == target.name
     if live.is_file():
         if active is not None:
             atomic_copy(live, active.path)
@@ -686,17 +768,13 @@ def command_switch(args: argparse.Namespace) -> int:
             backup = backup_untracked_auth(home)
             print(f"warning: current auth.json was unregistered; backed up to {backup}", file=sys.stderr)
 
-    if active is not None and active.name == target.name:
-        atomic_copy(target.path, live)
-        print(f"Already using {target.name}.")
-        print("Running Codex sessions keep their old account and may overwrite auth.json.")
-        print("Quit them, switch again if needed, then resume to use this login.")
-        return 0
-
     atomic_copy(target.path, live)
-    print(f"Switched to {target.name}.")
-    print("Running Codex sessions keep their old account and may overwrite auth.json.")
-    print("Quit them, switch again if needed, then resume to use this login.")
+    if same_account_on_disk:
+        print(f"Already using {target.name} on disk.")
+    else:
+        print(f"Switched to {target.name}.")
+    if daemon_status == "stopped":
+        print("Stopped the shared Codex background server; the next Codex launch will reload this account.")
     return 0
 
 
@@ -801,60 +879,34 @@ def command_kick(args: argparse.Namespace) -> int:
         print("error: no accounts registered", file=sys.stderr)
         return 2
 
-    live = home / "auth.json"
-    active = sync_active_to_canonical(home, discover_accounts(home))
+    # Persist any token rotation for the active account once. From here on each
+    # account is queried and greeted through an isolated CODEX_HOME.
+    sync_active_to_canonical(home, discover_accounts(home))
+
     failures = 0
-    with tempfile.TemporaryDirectory(prefix="codex-accounts-kick-") as td:
-        original = Path(td) / "auth.json"
-        had_auth = live.is_file()
-        if had_auth:
-            atomic_copy(live, original)
-        for account in accounts:
-            source = live if active == account and live.is_file() else account.path
-            item = query_account(account, source, codex_bin, 20.0)
-            if active == account and live.is_file():
-                atomic_copy(live, account.path)
-                atomic_copy(live, original)
-            if item.error:
-                print(f"{account.name}: usage check failed: {compact_error(item.error)}", file=sys.stderr)
+    for account in accounts:
+        item = query_account(account, account.path, codex_bin, 20.0)
+        if item.error:
+            print(f"{account.name}: usage check failed: {compact_error(item.error)}", file=sys.stderr)
+            failures += 1
+            continue
+        assert item.result is not None
+        five, week = choose_windows(extract_main_snapshot(item.result))
+        idle = [label for label, window in (("5 h", five), ("week", week)) if window_not_started(window)]
+        if not idle:
+            print(f"{account.name}: no unstarted window reported")
+            continue
+        try:
+            result = run_account_greeting(account, codex_bin)
+            if result.returncode:
+                detail = (result.stderr or result.stdout).strip().splitlines()
+                print(f"{account.name}: greeting failed: {detail[-1] if detail else result.returncode}", file=sys.stderr)
                 failures += 1
-                continue
-            assert item.result is not None
-            five, week = choose_windows(extract_main_snapshot(item.result))
-            idle = [label for label, window in (("5 h", five), ("week", week)) if window_not_started(window)]
-            if not idle:
-                print(f"{account.name}: no unstarted window reported")
-                continue
-            switched = False
-            try:
-                atomic_copy(account.path, live)
-                switched = True
-                env = os.environ.copy()
-                env["CODEX_HOME"] = str(home)
-                result = subprocess.run(
-                    [codex_bin, "exec", "--ephemeral", "--ignore-user-config", "--sandbox", "read-only",
-                     "--skip-git-repo-check", "-C", td, "Hi! Reply with only 'Hi'."],
-                    env=env, capture_output=True, text=True, timeout=120,
-                )
-                if result.returncode:
-                    detail = (result.stderr or result.stdout).strip().splitlines()
-                    print(f"{account.name}: greeting failed: {detail[-1] if detail else result.returncode}", file=sys.stderr)
-                    failures += 1
-                else:
-                    print(f"{account.name}: greeted (unstarted: {', '.join(idle)})")
-            except subprocess.TimeoutExpired:
-                print(f"{account.name}: greeting timed out", file=sys.stderr)
-                failures += 1
-            finally:
-                # Keep refreshed credentials for the greeted account, then restore the prior login.
-                if switched and live.is_file():
-                    atomic_copy(live, account.path)
-                    if active == account:
-                        atomic_copy(live, original)
-                if had_auth:
-                    atomic_copy(original, live)
-                else:
-                    live.unlink(missing_ok=True)
+            else:
+                print(f"{account.name}: greeted (unstarted: {', '.join(idle)})")
+        except subprocess.TimeoutExpired:
+            print(f"{account.name}: greeting timed out", file=sys.stderr)
+            failures += 1
     return 1 if failures else 0
 
 

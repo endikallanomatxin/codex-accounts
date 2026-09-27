@@ -37,7 +37,9 @@ class KickTests(unittest.TestCase):
             return accounts.QueryResult(account, result={"rateLimits": snapshots[account.name]})
 
         def greet(command, **kwargs):
-            seen.append((command, json.loads(self.auth.read_text())["tokens"]["account_id"]))
+            isolated_home = pathlib.Path(kwargs["env"]["CODEX_HOME"])
+            account_id = json.loads((isolated_home / "auth.json").read_text())["tokens"]["account_id"]
+            seen.append((command, account_id, isolated_home != self.home))
             return subprocess.CompletedProcess(command, 0, "Hi", "")
 
         with mock.patch.object(accounts, "query_account", side_effect=query), \
@@ -57,6 +59,7 @@ class KickTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0][1], "other")
+        self.assertTrue(seen[0][2])
         self.assertIn("exec", seen[0][0])
         self.assertEqual(json.loads(self.auth.read_text())["tokens"]["account_id"], "original")
 
