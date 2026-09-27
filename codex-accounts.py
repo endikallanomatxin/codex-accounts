@@ -689,10 +689,14 @@ def command_switch(args: argparse.Namespace) -> int:
     if active is not None and active.name == target.name:
         atomic_copy(target.path, live)
         print(f"Already using {target.name}.")
+        print("Running Codex sessions keep their old account and may overwrite auth.json.")
+        print("Quit them, switch again if needed, then resume to use this login.")
         return 0
 
     atomic_copy(target.path, live)
     print(f"Switched to {target.name}.")
+    print("Running Codex sessions keep their old account and may overwrite auth.json.")
+    print("Quit them, switch again if needed, then resume to use this login.")
     return 0
 
 

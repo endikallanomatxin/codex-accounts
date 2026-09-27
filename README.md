@@ -82,6 +82,8 @@ codex-accounts usage --verbose-errors
 
 Switching saves the current `auth.json` into its registered account file before activating the target. If the current login is not registered, the tool first backs it up under `~/.codex/accounts/.untracked-auth-<timestamp>.json`.
 
+The switch takes effect when Codex starts a new process. An already running Codex session keeps the account it started with, even if you continue that chat after changing `auth.json`. It can also refresh its old credentials and overwrite the new `auth.json`. Quit Codex before switching accounts, then resume the conversation under the new login. For the CLI, exit the old session, run `codex-accounts switch NAME` in your shell, then run `codex resume`. Check the active login on disk with `codex-accounts list`.
+
 `kick` checks the 5-hour and weekly windows for each account, or only the named account. If either window reports 0% used and no reset time, it briefly switches to that account and sends Codex `Hi! Reply with only 'Hi'.` through a non-interactive, read-only, ephemeral session. It then restores the login that was active before the command. Missing or ambiguous window data is skipped. Each greeting consumes a small amount of that account's usage.
 
 Run `codex-accounts --help` or `codex-accounts usage --help` for all options. You can choose a different Codex home with `--codex-home` or a different Codex executable with `--codex-bin`.
