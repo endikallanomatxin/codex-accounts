@@ -17,6 +17,7 @@ Commands:
     codex-accounts list
     codex-accounts switch NAME
     codex-accounts usage
+    codex-accounts kick [NAME]
 """
 
 from __future__ import annotations
@@ -121,6 +122,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show full app-server stderr for failed accounts.",
     )
+    p_kick = sub.add_parser(
+        "kick",
+        help="Start idle usage windows with a brief Codex greeting.",
+    )
+    p_kick.add_argument("name", nargs="?", help="Account to check (default: all accounts).")
     return parser.parse_args()
 
 
@@ -500,6 +506,15 @@ def choose_windows(snapshot: dict[str, Any]) -> tuple[dict[str, Any] | None, dic
     return five, week
 
 
+def window_not_started(window: dict[str, Any] | None) -> bool:
+    if not window or window.get("resetsAt") is not None:
+        return False
+    try:
+        return float(window["usedPercent"]) == 0
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def window_label(minutes: Any) -> str:
     if minutes == FIVE_HOURS_MIN:
         return "5 h"
@@ -766,6 +781,79 @@ def command_usage(args: argparse.Namespace) -> int:
     return 1 if any(item.error for item in results) else 0
 
 
+def command_kick(args: argparse.Namespace) -> int:
+    home = ensure_home(args)
+    codex_bin = shutil.which(args.codex_bin)
+    if codex_bin is None:
+        print(f"error: {args.codex_bin!r} not found in PATH", file=sys.stderr)
+        return 127
+    accounts = discover_accounts(home)
+    if args.name:
+        accounts = [account for account in accounts if account.name == args.name]
+        if not accounts:
+            print(f"error: unknown account: {args.name}", file=sys.stderr)
+            return 2
+    elif not accounts:
+        print("error: no accounts registered", file=sys.stderr)
+        return 2
+
+    live = home / "auth.json"
+    active = sync_active_to_canonical(home, discover_accounts(home))
+    failures = 0
+    with tempfile.TemporaryDirectory(prefix="codex-accounts-kick-") as td:
+        original = Path(td) / "auth.json"
+        had_auth = live.is_file()
+        if had_auth:
+            atomic_copy(live, original)
+        for account in accounts:
+            source = live if active == account and live.is_file() else account.path
+            item = query_account(account, source, codex_bin, 20.0)
+            if active == account and live.is_file():
+                atomic_copy(live, account.path)
+                atomic_copy(live, original)
+            if item.error:
+                print(f"{account.name}: usage check failed: {compact_error(item.error)}", file=sys.stderr)
+                failures += 1
+                continue
+            assert item.result is not None
+            five, week = choose_windows(extract_main_snapshot(item.result))
+            idle = [label for label, window in (("5 h", five), ("week", week)) if window_not_started(window)]
+            if not idle:
+                print(f"{account.name}: no unstarted window reported")
+                continue
+            switched = False
+            try:
+                atomic_copy(account.path, live)
+                switched = True
+                env = os.environ.copy()
+                env["CODEX_HOME"] = str(home)
+                result = subprocess.run(
+                    [codex_bin, "exec", "--ephemeral", "--ignore-user-config", "--sandbox", "read-only",
+                     "--skip-git-repo-check", "-C", td, "Hi! Reply with only 'Hi'."],
+                    env=env, capture_output=True, text=True, timeout=120,
+                )
+                if result.returncode:
+                    detail = (result.stderr or result.stdout).strip().splitlines()
+                    print(f"{account.name}: greeting failed: {detail[-1] if detail else result.returncode}", file=sys.stderr)
+                    failures += 1
+                else:
+                    print(f"{account.name}: greeted (unstarted: {', '.join(idle)})")
+            except subprocess.TimeoutExpired:
+                print(f"{account.name}: greeting timed out", file=sys.stderr)
+                failures += 1
+            finally:
+                # Keep refreshed credentials for the greeted account, then restore the prior login.
+                if switched and live.is_file():
+                    atomic_copy(live, account.path)
+                    if active == account:
+                        atomic_copy(live, original)
+                if had_auth:
+                    atomic_copy(original, live)
+                else:
+                    live.unlink(missing_ok=True)
+    return 1 if failures else 0
+
+
 def main() -> int:
     args = parse_args()
     try:
@@ -775,6 +863,8 @@ def main() -> int:
             return command_switch(args)
         if args.command == "usage":
             return command_usage(args)
+        if args.command == "kick":
+            return command_kick(args)
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

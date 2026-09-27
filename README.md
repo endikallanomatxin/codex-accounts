@@ -7,6 +7,7 @@ It can:
 - List registered accounts and show which one is active
 - Switch the active account without moving chats or other Codex data
 - Show remaining 5-hour and weekly usage, reset times, and available usage resets
+- Start an unstarted usage window with a short greeting
 
 Account credentials are stored locally in `~/.codex/accounts/<name>.json`. Codex continues to use `~/.codex/auth.json` for the active account. The tool uses only the Python standard library and the Codex CLI; it does not send credentials to a separate service.
 
@@ -66,6 +67,8 @@ If you previously used `codex-usage` with `~/.codex/auth-<name>.json`, the first
 codex-accounts list
 codex-accounts switch personal
 codex-accounts usage
+codex-accounts kick
+codex-accounts kick personal
 ```
 
 Useful usage options:
@@ -78,6 +81,8 @@ codex-accounts usage --verbose-errors
 ```
 
 Switching saves the current `auth.json` into its registered account file before activating the target. If the current login is not registered, the tool first backs it up under `~/.codex/accounts/.untracked-auth-<timestamp>.json`.
+
+`kick` checks the 5-hour and weekly windows for each account, or only the named account. If either window reports 0% used and no reset time, it briefly switches to that account and sends Codex `Hi! Reply with only 'Hi'.` through a non-interactive, read-only, ephemeral session. It then restores the login that was active before the command. Missing or ambiguous window data is skipped. Each greeting consumes a small amount of that account's usage.
 
 Run `codex-accounts --help` or `codex-accounts usage --help` for all options. You can choose a different Codex home with `--codex-home` or a different Codex executable with `--codex-bin`.
 
