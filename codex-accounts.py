@@ -576,9 +576,9 @@ def choose_windows(snapshot: dict[str, Any]) -> tuple[dict[str, Any] | None, dic
     week = None
     for window in iter_windows(snapshot):
         minutes = window.get("windowDurationMins")
-        if minutes == FIVE_HOURS_MIN:
+        if minutes in (FIVE_HOURS_MIN - 1, FIVE_HOURS_MIN):
             five = window
-        elif minutes == ONE_WEEK_MIN:
+        elif minutes in (ONE_WEEK_MIN - 1, ONE_WEEK_MIN):
             week = window
     return five, week
 
@@ -593,9 +593,9 @@ def window_not_started(window: dict[str, Any] | None) -> bool:
 
 
 def window_label(minutes: Any) -> str:
-    if minutes == FIVE_HOURS_MIN:
+    if minutes in (FIVE_HOURS_MIN - 1, FIVE_HOURS_MIN):
         return "5 h"
-    if minutes == ONE_WEEK_MIN:
+    if minutes in (ONE_WEEK_MIN - 1, ONE_WEEK_MIN):
         return "week"
     if isinstance(minutes, (int, float)):
         mins = int(minutes)

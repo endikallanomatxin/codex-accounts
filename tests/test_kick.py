@@ -69,6 +69,20 @@ class KickTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(seen, [])
 
+    def test_greets_windows_one_minute_short_of_nominal_duration(self):
+        unstarted = {"usedPercent": 0, "resetsAt": None}
+        snapshots = {
+            "other": {
+                "primary": unstarted | {"windowDurationMins": 299},
+                "secondary": unstarted | {"windowDurationMins": 10079},
+            }
+        }
+        status, seen = self.run_kick("other", snapshots)
+        self.assertEqual(status, 0)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(accounts.choose_windows(snapshots["other"]),
+                         (snapshots["other"]["primary"], snapshots["other"]["secondary"]))
+
     def test_failed_greeting_restores_login(self):
         window = {"usedPercent": 0, "windowDurationMins": 300, "resetsAt": None}
         args = argparse.Namespace(codex_home=self.home, codex_bin="codex", name="other")
