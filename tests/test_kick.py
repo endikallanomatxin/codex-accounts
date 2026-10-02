@@ -49,7 +49,7 @@ class KickTests(unittest.TestCase):
         return status, seen
 
     def test_greets_only_unstarted_account_and_restores_login(self):
-        started = {"usedPercent": 0, "windowDurationMins": 300, "resetsAt": 12345}
+        started = {"usedPercent": 1, "windowDurationMins": 300, "resetsAt": 12345}
         unstarted = {"usedPercent": 0, "windowDurationMins": 10080, "resetsAt": None}
         snapshots = {
             "original": {"primary": started, "secondary": started | {"windowDurationMins": 10080}},
@@ -82,6 +82,18 @@ class KickTests(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertEqual(accounts.choose_windows(snapshots["other"]),
                          (snapshots["other"]["primary"], snapshots["other"]["secondary"]))
+
+    def test_greets_zero_usage_with_synthetic_reset_times(self):
+        snapshots = {
+            "other": {
+                "primary": {"usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1790993973},
+                "secondary": {"usedPercent": 0, "windowDurationMins": 10080, "resetsAt": 1791580773},
+            }
+        }
+        status, seen = self.run_kick("other", snapshots)
+        self.assertEqual(status, 0)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][1], "other")
 
     def test_failed_greeting_restores_login(self):
         window = {"usedPercent": 0, "windowDurationMins": 300, "resetsAt": None}

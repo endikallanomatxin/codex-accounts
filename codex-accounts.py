@@ -584,7 +584,10 @@ def choose_windows(snapshot: dict[str, Any]) -> tuple[dict[str, Any] | None, dic
 
 
 def window_not_started(window: dict[str, Any] | None) -> bool:
-    if not window or window.get("resetsAt") is not None:
+    # Idle windows can report a synthetic reset timestamp that moves on each
+    # read. Zero reported usage is the actionable signal, though rounded usage
+    # can also make a lightly used window eligible for a greeting.
+    if not window:
         return False
     try:
         return float(window["usedPercent"]) == 0
@@ -894,7 +897,7 @@ def command_kick(args: argparse.Namespace) -> int:
         five, week = choose_windows(extract_main_snapshot(item.result))
         idle = [label for label, window in (("5 h", five), ("week", week)) if window_not_started(window)]
         if not idle:
-            print(f"{account.name}: no unstarted window reported")
+            print(f"{account.name}: no zero-usage window reported")
             continue
         try:
             result = run_account_greeting(account, codex_bin)
@@ -903,7 +906,7 @@ def command_kick(args: argparse.Namespace) -> int:
                 print(f"{account.name}: greeting failed: {detail[-1] if detail else result.returncode}", file=sys.stderr)
                 failures += 1
             else:
-                print(f"{account.name}: greeted (unstarted: {', '.join(idle)})")
+                print(f"{account.name}: greeted (zero usage: {', '.join(idle)})")
         except subprocess.TimeoutExpired:
             print(f"{account.name}: greeting timed out", file=sys.stderr)
             failures += 1
